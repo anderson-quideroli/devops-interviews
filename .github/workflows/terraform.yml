@@ -101,15 +101,18 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
+        env:
+          TF_VAR_env: ${{ env.TF_ENV }}
+          TF_VAR_image_tag: ${{ env.TF_IMAGE_TAG }}
         run: |
           set -euo pipefail
+          AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          S3_BUCKET_NAME="${S3_BUCKET_PREFIX}-${AWS_ACCOUNT_ID}"
 
-          terraform init -input=false -reconfigure \
-            -backend-config="bucket=${STATE_BUCKET_NAME}" \
+          terraform init -input=false \
+            -backend-config="bucket=${S3_BUCKET_NAME}" \
             -backend-config="key=${TF_STATE_KEY}" \
-            -backend-config="region=${AWS_REGION}" \
-            -backend-config="dynamodb_table=${LOCK_TABLE_NAME}" \
-            -backend-config="encrypt=true"
+            -backend-config="region=${AWS_REGION}"
 
       - name: Terraform Validate
         run: terraform validate
