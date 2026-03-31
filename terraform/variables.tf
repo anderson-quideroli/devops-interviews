@@ -25,7 +25,7 @@ variable "image_tag" {
 variable "bucket_prefix" {
   description = "Fixed S3 bucket prefix used for both Terraform state and the runtime S3 bucket"
   type        = string
-  default     = "devops-test-usecase-lambda-s3-api-"
+  default     = "devops-test-usecase-lambda-s3-api"
 }
 
 variable "ecr_repo_name" {
