@@ -1,11 +1,13 @@
 terraform {
   required_version = ">= 1.0"
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
   }
+
   backend "s3" {}
 }
 
@@ -13,34 +15,40 @@ provider "aws" {
   region = var.aws_region
 }
 
-locals {
-  name = "${var.env}-${var.project}"
-  s3_bucket_name = "${var.bucket_prefix}-${data.aws_caller_identity.current.account_id}"
-  ecr_repo_name  = var.ecr_repo_name
-  lambda_name   = var.lambda_function_name_prefix
-  lambda_role_name = "${var.lambda_function_name_prefix}-lambda-role"
-}
-
 data "aws_caller_identity" "current" {}
-
-# ---------------------------------------------------------------------------
-# Networking: dedicated VPC created once by Terraform state
-# ---------------------------------------------------------------------------
 
 data "aws_availability_zones" "available" {
   state = "available"
 }
 
+locals {
+  name             = "${var.env}-${var.project}"
+  s3_bucket_name   = "${var.bucket_prefix}-${data.aws_caller_identity.current.account_id}"
+  ecr_repo_name    = var.ecr_repo_name
+  lambda_name      = var.lambda_function_name_prefix
+  lambda_role_name = "${var.lambda_function_name_prefix}-lambda-role"
+}
+
+# ---------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------
+
 resource "aws_vpc" "main" {
   cidr_block           = "10.200.0.0/16"
   enable_dns_hostnames = true
   enable_dns_support   = true
-  tags = { Name = local.name }
+
+  tags = {
+    Name = local.name
+  }
 }
 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
-  tags   = { Name = local.name }
+
+  tags = {
+    Name = local.name
+  }
 }
 
 resource "aws_subnet" "public" {
@@ -48,23 +56,33 @@ resource "aws_subnet" "public" {
   cidr_block              = "10.200.1.0/24"
   availability_zone       = data.aws_availability_zones.available.names[0]
   map_public_ip_on_launch = true
-  tags                    = { Name = "${local.name}-public" }
+
+  tags = {
+    Name = "${local.name}-public"
+  }
 }
 
 resource "aws_subnet" "private" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = "10.200.2.0/24"
   availability_zone = data.aws_availability_zones.available.names[0]
-  tags              = { Name = "${local.name}-private" }
+
+  tags = {
+    Name = "${local.name}-private"
+  }
 }
 
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
+
   route {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.main.id
   }
-  tags = { Name = "${local.name}-public" }
+
+  tags = {
+    Name = "${local.name}-public"
+  }
 }
 
 resource "aws_route_table_association" "public" {
@@ -72,10 +90,12 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
-# Private route table
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
-  tags   = { Name = "${local.name}-private" }
+
+  tags = {
+    Name = "${local.name}-private"
+  }
 }
 
 resource "aws_route_table_association" "private" {
@@ -83,62 +103,111 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private.id
 }
 
-# Allow S3 connectivity
 resource "aws_vpc_endpoint" "s3" {
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.${var.aws_region}.s3"
   vpc_endpoint_type = "Gateway"
   route_table_ids   = [aws_route_table.private.id]
-  tags               = { Name = "${local.name}-s3-endpoint" }
+
+  tags = {
+    Name = "${local.name}-s3-endpoint"
+  }
 }
 
 # ---------------------------------------------------------------------------
-# S3 bucket
+# Runtime S3 bucket
 # ---------------------------------------------------------------------------
-data "aws_s3_bucket" "data" {
+
+resource "aws_s3_bucket" "runtime" {
   bucket = local.s3_bucket_name
+
+  tags = {
+    Name = local.s3_bucket_name
+  }
 }
 
 # ---------------------------------------------------------------------------
-# Lambda: role with CloudWatch Logs only
+# IAM / Lambda
 # ---------------------------------------------------------------------------
+
 resource "aws_iam_role" "lambda" {
   name = local.lambda_role_name
+
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = { Service = "lambda.amazonaws.com" }
-    }]
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
   })
 }
 
-# Only basic execution (CloudWatch Logs).
 resource "aws_iam_role_policy_attachment" "lambda_basic" {
   role       = aws_iam_role.lambda.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# VPC execution (ENI in private subnet)
 resource "aws_iam_role_policy_attachment" "lambda_vpc" {
   role       = aws_iam_role.lambda.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
+resource "aws_iam_role_policy" "lambda_s3" {
+  name = "${local.lambda_role_name}-s3"
+  role = aws_iam_role.lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ListAllBuckets"
+        Effect = "Allow"
+        Action = [
+          "s3:ListAllMyBuckets"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "ListRuntimeBucket"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = aws_s3_bucket.runtime.arn
+      },
+      {
+        Sid    = "GetRuntimeBucketObjects"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject"
+        ]
+        Resource = "${aws_s3_bucket.runtime.arn}/*"
+      }
+    ]
+  })
+}
+
 resource "aws_security_group" "lambda" {
   name_prefix = "${local.name}-lambda-"
   vpc_id      = aws_vpc.main.id
+
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  tags = { Name = "${local.name}-lambda" }
+
+  tags = {
+    Name = "${local.name}-lambda"
+  }
 }
 
-# Lambda is deployed as a container image from ECR (repository is pre-created by the workflow).
 data "aws_ecr_repository" "lambda" {
   name = local.ecr_repo_name
 }
@@ -157,10 +226,18 @@ resource "aws_lambda_function" "main" {
 
   environment {
     variables = {
-      BUCKET_NAME      = local.s3_bucket_name
+      BUCKET_NAME      = aws_s3_bucket.runtime.bucket
       EXTERNAL_API_URL = "https://httpbin.org/get"
     }
   }
 
-  tags = { Name = local.name }
+  tags = {
+    Name = local.name
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.lambda_basic,
+    aws_iam_role_policy_attachment.lambda_vpc,
+    aws_iam_role_policy.lambda_s3
+  ]
 }
